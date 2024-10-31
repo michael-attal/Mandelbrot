@@ -21,7 +21,9 @@ struct MetalMandelbrotView: NSViewRepresentable {
             fatalError("Metal is not supported on this device")
         }
 
-        let mtkView = MTKView(frame: .zero, device: metalDevice)
+        // Use the custom ZoomableMTKView
+        let mtkView = ZoomableMTKView(frame: .zero, device: metalDevice)
+        mtkView.coordinator = context.coordinator
         mtkView.delegate = context.coordinator
         mtkView.enableSetNeedsDisplay = true
         mtkView.isPaused = false
@@ -151,62 +153,70 @@ struct MetalMandelbrotView: NSViewRepresentable {
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
+        // Shared zoom handling method
+        func zoom(at locationInView: CGPoint, in view: NSView, with zoomFactor: CGFloat) {
+            let viewSize = view.bounds.size
+
+            // Normalize the cursor position to (-1, 1) range
+            let normalizedX = (locationInView.x / viewSize.width) * 2 - 1
+            let normalizedY = (locationInView.y / viewSize.height) * 2 - 1
+
+            // Adjust for coordinate system
+            let adjustedY = -normalizedY
+
+            // Convert to complex plane coordinates
+            let aspectRatio = Float(viewSize.width / viewSize.height)
+            let width = (baseCmax.x - baseCmin.x) / Float(zoom)
+            let height = (baseCmax.y - baseCmin.y) / Float(zoom)
+            var adjustedWidth = width
+            var adjustedHeight = height
+            if aspectRatio > 1 {
+                adjustedWidth = width * aspectRatio
+            } else {
+                adjustedHeight = height / aspectRatio
+            }
+
+            let centerX = (baseCmin.x + baseCmax.x) / 2.0 - Float(panOffset.width) * adjustedWidth
+            let centerY = (baseCmin.y + baseCmax.y) / 2.0 + Float(panOffset.height) * adjustedHeight
+
+            let cursorComplexX = centerX + Float(normalizedX) * adjustedWidth / 2.0
+            let cursorComplexY = centerY + Float(adjustedY) * adjustedHeight / 2.0
+
+            // Update the zoom level
+            zoom *= zoomFactor
+
+            // Calculate the new adjusted width and height
+            let newWidth = (baseCmax.x - baseCmin.x) / Float(zoom)
+            let newHeight = (baseCmax.y - baseCmin.y) / Float(zoom)
+            var newAdjustedWidth = newWidth
+            var newAdjustedHeight = newHeight
+            if aspectRatio > 1 {
+                newAdjustedWidth = newWidth * aspectRatio
+            } else {
+                newAdjustedHeight = newHeight / aspectRatio
+            }
+
+            // Calculate the new center so that the cursor stays in the same place
+            let newCenterX = cursorComplexX - Float(normalizedX) * newAdjustedWidth / 2.0
+            let newCenterY = cursorComplexY - Float(adjustedY) * newAdjustedHeight / 2.0
+
+            // Update panOffset based on the new center
+            panOffset.width = CGFloat(((baseCmin.x + baseCmax.x) / 2.0 - newCenterX) / newAdjustedWidth)
+            panOffset.height = CGFloat((newCenterY - (baseCmin.y + baseCmax.y) / 2.0) / newAdjustedHeight)
+        }
+
         // Gesture handling methods
         @objc func handleMagnification(_ sender: NSMagnificationGestureRecognizer) {
             if sender.state == .changed {
-                // Get the location of the gesture in view coordinates
                 guard let view = sender.view else { return }
                 let locationInView = sender.location(in: view)
-                let viewSize = view.bounds.size
 
-                // Normalize the cursor position to (-1, 1) range
-                let normalizedX = (locationInView.x / viewSize.width) * 2 - 1
-                let normalizedY = (locationInView.y / viewSize.height) * 2 - 1
-
-                // Adjust for coordinate system
-                let adjustedY = -normalizedY
-
-                // Convert to complex plane coordinates
-                let aspectRatio = Float(viewSize.width / viewSize.height)
-                let width = (baseCmax.x - baseCmin.x) / Float(zoom)
-                let height = (baseCmax.y - baseCmin.y) / Float(zoom)
-                var adjustedWidth = width
-                var adjustedHeight = height
-                if aspectRatio > 1 {
-                    adjustedWidth = width * aspectRatio
-                } else {
-                    adjustedHeight = height / aspectRatio
-                }
-
-                let centerX = (baseCmin.x + baseCmax.x) / 2.0 - Float(panOffset.width) * adjustedWidth
-                let centerY = (baseCmin.y + baseCmax.y) / 2.0 + Float(panOffset.height) * adjustedHeight
-
-                let cursorComplexX = centerX + Float(normalizedX) * adjustedWidth / 2.0
-                let cursorComplexY = centerY + Float(adjustedY) * adjustedHeight / 2.0
-
-                // Update the zoom level
-                let previousZoom = zoom
-                zoom *= 1 + sender.magnification
+                // Compute the zoom factor
+                let zoomFactor = 1 + sender.magnification
                 sender.magnification = 0 // Reset magnification
 
-                // Calculate the new adjusted width and height
-                let newWidth = (baseCmax.x - baseCmin.x) / Float(zoom)
-                let newHeight = (baseCmax.y - baseCmin.y) / Float(zoom)
-                var newAdjustedWidth = newWidth
-                var newAdjustedHeight = newHeight
-                if aspectRatio > 1 {
-                    newAdjustedWidth = newWidth * aspectRatio
-                } else {
-                    newAdjustedHeight = newHeight / aspectRatio
-                }
-
-                // Calculate the new center so that the cursor stays in the same place
-                let newCenterX = cursorComplexX - Float(normalizedX) * newAdjustedWidth / 2.0
-                let newCenterY = cursorComplexY - Float(adjustedY) * newAdjustedHeight / 2.0
-
-                // Update panOffset based on the new center
-                panOffset.width = CGFloat(((baseCmin.x + baseCmax.x) / 2.0 - newCenterX) / newAdjustedWidth)
-                panOffset.height = CGFloat((newCenterY - (baseCmin.y + baseCmax.y) / 2.0) / newAdjustedHeight)
+                // Use the shared zoom method
+                zoom(at: locationInView, in: view, with: zoomFactor)
             }
         }
 
@@ -219,6 +229,30 @@ struct MetalMandelbrotView: NSViewRepresentable {
             panOffset.height -= translation.y / viewSize.height
 
             sender.setTranslation(.zero, in: sender.view)
+        }
+
+        // Method to handle scroll wheel events
+        func handleScrollWheel(_ event: NSEvent) {
+            guard let view = event.window?.contentView else { return }
+
+            // Get the location of the cursor in view coordinates
+            let locationInView = view.convert(event.locationInWindow, from: nil)
+
+            // Compute the zoom factor
+            let scrollSensitivity: CGFloat = 0.01
+            let zoomFactor = 1 + event.deltaY * scrollSensitivity
+
+            // Use the shared zoom method
+            zoom(at: locationInView, in: view, with: zoomFactor)
+        }
+    }
+
+    // Custom MTKView subclass to handle scroll wheel events
+    class ZoomableMTKView: MTKView {
+        weak var coordinator: Coordinator?
+
+        override func scrollWheel(with event: NSEvent) {
+            coordinator?.handleScrollWheel(event)
         }
     }
 }
