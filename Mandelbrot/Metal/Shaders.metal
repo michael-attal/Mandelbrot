@@ -9,10 +9,10 @@
 using namespace metal;
 
 struct Uniforms {
-    float2 cmin;          // 8 bytes
-    float2 cmax;          // 8 bytes
-    int maxIterations;    // 4 bytes
-    uint padding;         // 4 bytes padding to match alignment
+    float2 cmin;
+    float2 cmax;
+    int maxIterations;
+    uint padding;
 };
 
 struct VertexOut {
@@ -20,8 +20,14 @@ struct VertexOut {
     float2 texCoord;
 };
 
-vertex VertexOut vertexShader(uint vertexID [[ vertex_id ]]) {
-    // Positions of the full-screen quad
+// Helper function to convert HSV to RGB
+float3 hsv2rgb(float3 c) {
+    float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    float3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+vertex VertexOut vertexShader(uint vertexID [[vertex_id]]) {
     float4 positions[4] = {
         float4(-1.0, -1.0, 0.0, 1.0),
         float4(-1.0,  1.0, 0.0, 1.0),
@@ -43,7 +49,7 @@ vertex VertexOut vertexShader(uint vertexID [[ vertex_id ]]) {
 }
 
 fragment float4 fragmentShader(VertexOut in [[stage_in]],
-                               constant Uniforms& uniforms [[ buffer(0) ]]) {
+                               constant Uniforms& uniforms [[buffer(0)]]) {
     float2 uv = in.texCoord;
 
     // Convert texture coordinates to complex plane coordinates
@@ -60,7 +66,11 @@ fragment float4 fragmentShader(VertexOut in [[stage_in]],
         if (dot(z, z) > 4.0) break;
     }
 
-    // Map the number of iterations to a grayscale color
-    float color = float(i) / float(maxIterations);
-    return float4(color, color, color, 1.0);
+    // Map the number of iterations to a color using HSV color space
+    float hue = float(i) / float(maxIterations);
+    float saturation = 1.0;
+    float value = i < maxIterations ? 1.0 : 0.0; // Black inside the set
+
+    float3 color = hsv2rgb(float3(hue, saturation, value));
+    return float4(color, 1.0);
 }

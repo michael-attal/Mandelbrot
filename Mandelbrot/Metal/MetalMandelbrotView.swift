@@ -9,8 +9,11 @@ import MetalKit
 import SwiftUI
 
 struct MetalMandelbrotView: NSViewRepresentable {
+    @State private var zoom: CGFloat = 1.0
+    @State private var panOffset: CGSize = .zero
+
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(zoom: $zoom, panOffset: $panOffset)
     }
 
     func makeNSView(context: Context) -> MTKView {
@@ -18,11 +21,18 @@ struct MetalMandelbrotView: NSViewRepresentable {
             fatalError("Metal is not supported on this device")
         }
 
-        // Create and configure the MTKView
         let mtkView = MTKView(frame: .zero, device: metalDevice)
         mtkView.delegate = context.coordinator
         mtkView.enableSetNeedsDisplay = true
         mtkView.isPaused = false
+
+        // Add gesture recognizers
+        let pinchRecognizer = NSMagnificationGestureRecognizer(target: context.coordinator, action: #selector(context.coordinator.handleMagnification(_:)))
+        mtkView.addGestureRecognizer(pinchRecognizer)
+
+        let panRecognizer = NSPanGestureRecognizer(target: context.coordinator, action: #selector(context.coordinator.handlePan(_:)))
+        mtkView.addGestureRecognizer(panRecognizer)
+
         return mtkView
     }
 
@@ -34,20 +44,28 @@ struct MetalMandelbrotView: NSViewRepresentable {
         var pipelineState: MTLRenderPipelineState!
         var uniformsBuffer: MTLBuffer!
 
+        @Binding var zoom: CGFloat
+        @Binding var panOffset: CGSize
+
         struct Uniforms {
             var cmin: SIMD2<Float>
             var cmax: SIMD2<Float>
             var maxIterations: Int32
-            var padding: UInt32 = 0 // Padding to match Metal's alignment
+            var padding: UInt32 = 0
         }
 
-        var uniforms = Uniforms(
-            cmin: SIMD2<Float>(-2.0, -1.5),
-            cmax: SIMD2<Float>(1.0, 1.5),
-            maxIterations: 256
-        )
+        var baseCmin = SIMD2<Float>(-2.0, -1.5)
+        var baseCmax = SIMD2<Float>(1.0, 1.5)
+        var uniforms: Uniforms
 
-        override init() {
+        init(zoom: Binding<CGFloat>, panOffset: Binding<CGSize>) {
+            self._zoom = zoom
+            self._panOffset = panOffset
+            self.uniforms = Uniforms(
+                cmin: baseCmin,
+                cmax: baseCmax,
+                maxIterations: 256
+            )
             super.init()
             setupMetal()
             createPipelineState()
@@ -78,14 +96,41 @@ struct MetalMandelbrotView: NSViewRepresentable {
         }
 
         func createUniformsBuffer() {
-            uniformsBuffer = metalDevice.makeBuffer(bytes: &uniforms,
-                                                    length: MemoryLayout<Uniforms>.size,
-                                                    options: [])
+            uniformsBuffer = metalDevice.makeBuffer(length: MemoryLayout<Uniforms>.size, options: [])
+        }
+
+        func updateUniformsBuffer(viewSize: CGSize) {
+            let aspectRatio = Float(viewSize.width / viewSize.height)
+
+            // Calculate the new width and height based on the zoom level
+            let width = (baseCmax.x - baseCmin.x) / Float(zoom)
+            let height = (baseCmax.y - baseCmin.y) / Float(zoom)
+
+            // Apply aspect ratio correction
+            var adjustedWidth = width
+            var adjustedHeight = height
+            if aspectRatio > 1 {
+                adjustedWidth = width * aspectRatio
+            } else {
+                adjustedHeight = height / aspectRatio
+            }
+
+            // Calculate the center point with panning
+            let centerX = (baseCmin.x + baseCmax.x) / 2.0 - Float(panOffset.width) * adjustedWidth
+            let centerY = (baseCmin.y + baseCmax.y) / 2.0 + Float(panOffset.height) * adjustedHeight
+
+            uniforms.cmin = SIMD2<Float>(centerX - adjustedWidth / 2.0, centerY - adjustedHeight / 2.0)
+            uniforms.cmax = SIMD2<Float>(centerX + adjustedWidth / 2.0, centerY + adjustedHeight / 2.0)
+
+            let bufferPointer = uniformsBuffer.contents()
+            memcpy(bufferPointer, &uniforms, MemoryLayout<Uniforms>.size)
         }
 
         func draw(in view: MTKView) {
             guard let drawable = view.currentDrawable,
                   let renderPassDescriptor = view.currentRenderPassDescriptor else { return }
+
+            updateUniformsBuffer(viewSize: view.drawableSize)
 
             let commandBuffer = metalCommandQueue.makeCommandBuffer()!
 
@@ -105,5 +150,75 @@ struct MetalMandelbrotView: NSViewRepresentable {
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+
+        // Gesture handling methods
+        @objc func handleMagnification(_ sender: NSMagnificationGestureRecognizer) {
+            if sender.state == .changed {
+                // Get the location of the gesture in view coordinates
+                guard let view = sender.view else { return }
+                let locationInView = sender.location(in: view)
+                let viewSize = view.bounds.size
+
+                // Normalize the cursor position to (-1, 1) range
+                let normalizedX = (locationInView.x / viewSize.width) * 2 - 1
+                let normalizedY = (locationInView.y / viewSize.height) * 2 - 1
+
+                // Adjust for coordinate system
+                let adjustedY = -normalizedY
+
+                // Convert to complex plane coordinates
+                let aspectRatio = Float(viewSize.width / viewSize.height)
+                let width = (baseCmax.x - baseCmin.x) / Float(zoom)
+                let height = (baseCmax.y - baseCmin.y) / Float(zoom)
+                var adjustedWidth = width
+                var adjustedHeight = height
+                if aspectRatio > 1 {
+                    adjustedWidth = width * aspectRatio
+                } else {
+                    adjustedHeight = height / aspectRatio
+                }
+
+                let centerX = (baseCmin.x + baseCmax.x) / 2.0 - Float(panOffset.width) * adjustedWidth
+                let centerY = (baseCmin.y + baseCmax.y) / 2.0 + Float(panOffset.height) * adjustedHeight
+
+                let cursorComplexX = centerX + Float(normalizedX) * adjustedWidth / 2.0
+                let cursorComplexY = centerY + Float(adjustedY) * adjustedHeight / 2.0
+
+                // Update the zoom level
+                let previousZoom = zoom
+                zoom *= 1 + sender.magnification
+                sender.magnification = 0 // Reset magnification
+
+                // Calculate the new adjusted width and height
+                let newWidth = (baseCmax.x - baseCmin.x) / Float(zoom)
+                let newHeight = (baseCmax.y - baseCmin.y) / Float(zoom)
+                var newAdjustedWidth = newWidth
+                var newAdjustedHeight = newHeight
+                if aspectRatio > 1 {
+                    newAdjustedWidth = newWidth * aspectRatio
+                } else {
+                    newAdjustedHeight = newHeight / aspectRatio
+                }
+
+                // Calculate the new center so that the cursor stays in the same place
+                let newCenterX = cursorComplexX - Float(normalizedX) * newAdjustedWidth / 2.0
+                let newCenterY = cursorComplexY - Float(adjustedY) * newAdjustedHeight / 2.0
+
+                // Update panOffset based on the new center
+                panOffset.width = CGFloat(((baseCmin.x + baseCmax.x) / 2.0 - newCenterX) / newAdjustedWidth)
+                panOffset.height = CGFloat((newCenterY - (baseCmin.y + baseCmax.y) / 2.0) / newAdjustedHeight)
+            }
+        }
+
+        @objc func handlePan(_ sender: NSPanGestureRecognizer) {
+            let translation = sender.translation(in: sender.view)
+            let viewSize = sender.view?.bounds.size ?? CGSize(width: 1, height: 1)
+
+            // Update panOffset based on the translation and view size
+            panOffset.width += translation.x / viewSize.width
+            panOffset.height -= translation.y / viewSize.height
+
+            sender.setTranslation(.zero, in: sender.view)
+        }
     }
 }
